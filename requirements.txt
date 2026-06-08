@@ -1,0 +1,18 @@
+# BaseDyGraph dependencies.
+# Minimum-version floors that are known to work together; once your environment
+# runs, `pip freeze > requirements.lock.txt` to capture exact versions.
+# Install into a virtual environment (see the README Installation section).
+
+# --- core model + training ---
+torch>=2.0
+lightning>=2.0          # provides `lightning.pytorch` (the unified package, not pytorch-lightning)
+numpy>=1.24
+
+# --- experiment tooling ---
+wandb>=0.16             # logging + hyperparameter sweeps
+pyyaml>=6.0             # reads configs/*.yaml in the sweep notebook
+scipy>=1.10             # optional: paired t-test in the ablation-ladder notebook
+
+# --- notebooks ---
+jupyterlab>=4.0
+ipykernel>=6.0          # register the venv as a Jupyter kernel

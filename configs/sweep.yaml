@@ -1,0 +1,68 @@
+# Weights & Biases sweep for BaseDyGraph.
+#
+# Run it from notebooks/BaseDyGraph_sweep.ipynb (recommended), which loads this
+# file and drives the agent. Parameter names below are plain field names from
+# ModelConfig / SyntheticGraphDataConfig / the training block; the notebook
+# routes each one to the right config object by inspecting the dataclasses, so
+# overriding a data field regenerates the dataset while model/training fields
+# do not.
+#
+# CLI alternative (runs each trial as its own process):
+#   1. export a runnable script (the notebook has a "Save as script" note), then
+#      add a top-level `program: <that_script>.py` key here;
+#   2. wandb sweep configs/sweep.yaml
+#   3. wandb agent <entity>/<project>/<sweep_id>
+
+method: bayes
+
+metric:
+  name: val/acc            # logged every epoch by the LightningModule
+  goal: maximize
+  # For the multi-objective target (accuracy + graph fidelity), switch to
+  #   name: final/sweep_score
+  # which the notebook logs once at the end (and disable early_terminate below).
+
+parameters:
+  # --- optimisation ---
+  lr:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.003
+  weight_decay:
+    values: [0.0, 0.0001, 0.001]
+  seed:
+    values: [0, 1, 2]
+
+  # --- capacity ---
+  d_model:
+    values: [64, 96, 128]
+  num_edge_heads:
+    values: [2, 4]
+  graph_hidden_dim:
+    values: [32, 64, 128]
+  num_st_blocks:
+    values: [2, 3]
+
+  # --- graph-inference choices ---
+  spatial_value:
+    values: [hidden, state_embedding, concat]
+  graph_activation:
+    values: [softmax, entmax15]
+  dynamic_residual_init:
+    values: [0.1, 0.3, 0.5]
+  dynamic_residual_mix:
+    values: [logit, convex]
+
+  # --- graph-shape regularisation (sharpen toward entropy < 2) ---
+  graph_target_entropy_reg:
+    values: [0.0, 0.01, 0.05]
+  graph_target_entropy:
+    values: [1.8, 2.0, 2.2]
+
+# Hyperband pruning. Works cleanly with the CLI agent (each trial is its own
+# process). With the in-notebook agent it may not interrupt an in-progress
+# trainer.fit; see the notebook note. min_iter is in epochs (the val/acc step).
+early_terminate:
+  type: hyperband
+  min_iter: 20
+  eta: 3

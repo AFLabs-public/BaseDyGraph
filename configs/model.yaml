@@ -1,0 +1,63 @@
+# Base model configuration for BaseDyGraph.
+# `model:` maps to src/utilities.py:ModelConfig (num_states / num_nodes are filled
+# from data.yaml at load time, so they are intentionally omitted here).
+# `training:` holds the optimisation knobs consumed by the notebooks.
+#
+# This is a known-good interlaced dynamic-base setup. The sweep overrides a
+# subset of these fields; everything not swept falls back to the values here.
+
+model:
+  # --- dimensions / capacity ---
+  d_model: 96
+  nhead: 6
+  num_temporal_layers: 2
+  num_spatial_layers: 1
+  num_edge_heads: 4
+  graph_hidden_dim: 64
+  ff_mult: 4
+  dropout: 0.0
+  spatial_dropout: 0.0          # keep the scorer's adjacency exactly row-stochastic
+
+  # --- embeddings / graph structure ---
+  use_node_embedding: true
+  use_state_pair_bias: true
+  add_self_loops: false
+  symmetric_graph: false
+
+  # --- module types ---
+  temporal_module_type: transformer
+  spatial_module_type: dynamic_base
+  spatial_value: concat           # mix raw current-state emb + hidden (matches A @ kernel[s])
+  graph_activation: softmax       # dense during training; sparsemax/entmax15 also available
+  gate_tau: 1.0
+  gate_row_normalise: true
+
+  # --- interlaced spatio-temporal stack ---
+  interlaced_st_blocks: true
+  num_st_blocks: 3
+  first_spatial_module_type: static_graph
+  st_block_post_norm: true
+
+  # --- dynamic-base convex residual gate ---
+  dynamic_residual_gate: per_head
+  dynamic_residual_init: 0.5
+  dynamic_residual_learnable: true
+  dynamic_residual_mix: convex
+
+  # --- graph-shape regularisation (off by default; sweep can switch on) ---
+  graph_reg_layer: -1
+  graph_reg_warmup_epochs: 20
+  graph_entropy_reg: 0.0
+  graph_target_entropy: 2.0
+  graph_target_entropy_reg: 0.0
+  graph_temporal_smooth_reg: 0.0
+
+  # --- graph evaluation / logging ---
+  graph_eval_layer: -1
+  graph_log_all_layers: true
+
+training:
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  max_epochs: 120
+  seed: 0
