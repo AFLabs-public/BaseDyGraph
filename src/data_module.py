@@ -1,12 +1,9 @@
 """
 Dataset and Lightning DataModule for discrete state-token sequences.
 
-Extracted verbatim from the research notebook so notebooks can import it:
-    from data_module import DiscreteStateSequenceDataset, DiscreteStateDataModule
-
-Batch format (what the model and evaluation utilities expect):
-    {"state_ids": (N, T)}                      collated -> (B, N, T)
-    {"state_ids": (N, T), "regimes": (T,)}     collated -> +(B, T)
+Batch format expected by the model and evaluation code:
+    {"state_ids": (N, T)}                   collated -> (B, N, T)
+    {"state_ids": (N, T), "regimes": (T,)}  collated -> + (B, T)
 """
 
 from typing import Dict, Optional

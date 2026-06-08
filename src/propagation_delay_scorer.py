@@ -1,24 +1,21 @@
 """
 Propagation-delay (lead-lag) graph scorer.
 
-Drop-in alternative to DynamicGraphScorer with the SAME contract:
-    forward(h, state_ids) -> attn  with  h: (B, T, N, D)  ->  (B, T, H, N, N)
+Drop-in alternative to DynamicGraphScorer with the same contract:
+    forward(h, state_ids) -> attn,  h: (B, T, N, D) -> (B, T, H, N, N)
 
-Difference from the contemporaneous scorer:
-    - Query comes from the CURRENT step h_t.
-    - Keys/Values come from each node's RECENT WINDOW h_{t-S+1 : t}.
-So an edge score A_t[i, j] reflects node i's present aligned against node j's
-recent trajectory -> directional, lagged coupling (propagation delay), which a
-contemporaneous Q_t K_t^T scorer cannot represent.
+The query comes from the current step h_t; the keys and values come from each
+node's recent window h_{t-S+1 : t}. An edge score A_t[i, j] therefore compares
+node i's present against node j's recent trajectory, giving directional, lagged
+coupling that a contemporaneous Q_t K_t^T scorer cannot represent.
 
-The window gives S scores per (i, j) pair (one per lag). They are collapsed to a
-single edge weight by `lag_aggregation`:
-    "softmax" : softmax-weighted sum over lags (default; soft lag selection)
-    "max"     : strongest match over lags (hard lag discovery)
-    "mean"    : average over lags (smooth; blurs the lag)
+The window produces S scores per (i, j) pair, one per lag, collapsed to a single
+edge weight by `lag_aggregation`:
+    "softmax" : softmax-weighted sum over lags (soft lag selection)
+    "max"     : strongest match over lags (hard lag selection)
+    "mean"    : average over lags
 
-Causal by construction: lags only look backward; front padding is masked out.
-No prototype/motif codebook is used (deliberately omitted as unnecessary here).
+Causal: lags only look backward and front padding is masked out.
 """
 
 import math
@@ -85,7 +82,7 @@ class PropagationDelayGraphScorer(nn.Module):
         pad = (valid == 0).view(1, t, 1, 1, 1, s)
         scores = scores.masked_fill(pad, float("-inf"))
 
-        attn_per_lag = scores  # keep name explicit
+        attn_per_lag = scores
 
         if self.lag_aggregation == "max":
             logits = attn_per_lag.max(dim=-1).values                       # (B,T,H,N,N)
@@ -110,7 +107,7 @@ class PropagationDelayGraphScorer(nn.Module):
             attn = attn / attn.sum(dim=-1, keepdim=True).clamp_min(1e-6)
 
         if return_lag_scores:
-            # per-lag scores (B,T,H,N,N,S) with padded lags set to -inf; useful for
-            # asking "which lag carries the edge" via argmax over the last axis.
+            # per-lag scores (B,T,H,N,N,S), padded lags at -inf; argmax over the
+            # last axis identifies which lag carries each edge.
             return attn, attn_per_lag
         return attn

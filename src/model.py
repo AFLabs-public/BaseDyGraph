@@ -1,32 +1,17 @@
 """
-Model: backbone + next-state head + Lightning module.
+Backbone, next-state head, and Lightning module for the discrete ST-graph model.
 
-Extracted from the research notebook so notebooks can import it:
-    from model import DiscreteSTGraphBackbone, NextStateHead, DiscreteSTGraphLightningModule
-
-DEPENDENCY NOTE
----------------
-This module relies on your existing code for:
-    ModelConfig, build_temporal_module, build_spatial_components
-which live in `modules.py` / `utilities.py`. Make sure those are importable
-(same directory on sys.path). The `from modules import *` / `from utilities import *`
-lines below mirror the original notebook; adjust if your module names differ.
-
-If you wire the new PropagationDelayGraphScorer into the spatial stage, do it inside
-`build_spatial_components` in your modules.py (add a `spatial_module_type ==
-"propagation_delay"` branch). This file does not modify your factory.
+Depends on modules.py and utilities.py for ModelConfig, build_temporal_module,
+and build_spatial_components.
 """
 
-from typing import Any, Dict, Optional
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning.pytorch as pl
-from typing import Dict, List, Optional, Tuple
 
-# Your existing code (ModelConfig, build_temporal_module, build_spatial_components, ...)
 from utilities import *      # noqa: F401,F403
 from modules import *        # noqa: F401,F403
 
@@ -56,9 +41,9 @@ class InterlacedSTBlock(nn.Module):
             self.graph_scorer = None
             self.spatial_module = SpatialMessagePassing(cfg)  # noqa: F821
         else:
-            # Build this block's scorer with a shallow config override so each
-            # block can use a different spatial module type while sharing all
-            # other graph/normalisation/gate knobs.
+            # Build this block's scorer with a config override so each block can
+            # use a different spatial module type while sharing the other graph,
+            # normalisation, and gate settings.
             try:
                 from dataclasses import replace
                 block_cfg = replace(cfg, spatial_module_type=spatial_module_type)
@@ -114,8 +99,8 @@ class InterlacedSTBlock(nn.Module):
 class DiscreteSTGraphBackbone(nn.Module):
     """State IDs -> embeddings -> temporal/spatial backbone -> head-ready reps.
 
-    Default path is the original architecture. Set either
-    `interlaced_st_blocks=True` or `num_st_blocks > 1` to use repeated
+    The default path is a single temporal stage then one graph/spatial stage.
+    Set interlaced_st_blocks=True or num_st_blocks > 1 for repeated
     temporal -> graph -> spatial blocks.
     """
 
@@ -147,8 +132,8 @@ class DiscreteSTGraphBackbone(nn.Module):
 
             self.st_blocks = nn.ModuleList([InterlacedSTBlock(cfg, stype) for stype in block_types])
 
-            # Backwards-compatible handles used by logging/evaluation code. They
-            # point to the last block, which is usually the refined graph scorer.
+            # Handles used by logging/evaluation; point at the last block's
+            # scorer and spatial module.
             last = self.st_blocks[-1]
             self.graph_scorer = getattr(last, "graph_scorer", None)
             self.spatial_module = getattr(last, "spatial_module", None)
@@ -173,9 +158,8 @@ class DiscreteSTGraphBackbone(nn.Module):
     def temporal_output(self, state_ids: torch.Tensor) -> torch.Tensor:
         """Representation fed to the final graph scorer, shape (B, T, N, D).
 
-        In the original path this is the post-temporal representation. In the
-        interlaced path it is the representation immediately before the final
-        block's spatial graph scorer is applied.
+        Single-stage path: the post-temporal representation. Interlaced path: the
+        representation just before the final block's graph scorer.
         """
         x = self._initial_embedding_bntd(state_ids)
         if not self.use_interlaced:
@@ -199,11 +183,10 @@ class DiscreteSTGraphBackbone(nn.Module):
         return e.permute(0, 2, 1, 3).contiguous()                      # (B, T, N, D)
 
     def _select_graph_attn(self, block_attns: List[Optional[torch.Tensor]]) -> Optional[torch.Tensor]:
-        """Select the graph exposed as out["graph_attn"] for legacy evaluation.
+        """Select the graph exposed as out["graph_attn"].
 
-        graph_eval_layer=-1 selects the last non-None graph. Non-negative values
-        select that exact interlaced block index. This makes it explicit whether
-        recovery metrics are being computed from layer 0, layer 1, etc.
+        graph_eval_layer = -1 selects the last non-None graph; a non-negative
+        value selects that block index.
         """
         if not block_attns:
             return None
@@ -344,10 +327,9 @@ class DiscreteSTGraphLightningModule(pl.LightningModule):
         denom = pc.std(-1) * tc.std(-1)
         corr = ((pc * tc).mean(-1) / denom.clamp_min(1e-6)).mean()
 
-        # AUROC is scale-fair: does the attention RANK true edges above non-edges?
-        # Unlike Pearson corr, it doesn't penalise dense softmax for failing to match
-        # the true graph's exact-zero sparsity — it only asks about ordering. This is
-        # the right recovery metric while the activation is dense (softmax).
+        # AUROC measures whether the attention ranks true edges above non-edges,
+        # independent of scale. Unlike correlation it does not penalise a dense
+        # softmax for not matching the exact zeros of a sparse target graph.
         a = attn_off.reshape(-1)
         lbl = (true_off.reshape(-1) > 0)
         pos, neg = a[lbl], a[~lbl]
@@ -461,10 +443,8 @@ class DiscreteSTGraphLightningModule(pl.LightningModule):
     def _select_graph_for_regularisation(self, out: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
         """Return the graph attention tensor to regularise.
 
-        Defaults to the same selected/final graph used for evaluation. In an
-        interlaced stack, cfg.graph_reg_layer=-1 selects the last non-None graph;
-        non-negative values select a specific block. For the old single-block
-        path, this is just out["graph_attn"].
+        graph_reg_layer = -1 selects the last non-None graph; a non-negative value
+        selects a specific block. Single-stage path returns out["graph_attn"].
         """
         block_attns = out.get("block_graph_attns", None)
         if block_attns is None:
@@ -495,12 +475,10 @@ class DiscreteSTGraphLightningModule(pl.LightningModule):
         stage: str,
         step: bool,
     ) -> torch.Tensor:
-        """Optional unsupervised graph-shape regularisation.
+        """Optional graph-shape regularisation.
 
-        Returns a scalar tensor. All terms are disabled by default, so existing
-        runs are exactly unchanged unless the corresponding coefficients are set.
-        Regularisation is logged under graph_reg/{stage}/... and is applied to
-        the training objective only by _shared_step.
+        Returns a scalar; all terms are zero unless their coefficients are set.
+        Logged under graph_reg/{stage}/... and added to the training loss only.
         """
         attn = self._select_graph_for_regularisation(out)
         device = out["next_state_logits"].device
@@ -528,9 +506,8 @@ class DiscreteSTGraphLightningModule(pl.LightningModule):
         if target_entropy_coef != 0.0:
             target = getattr(self.cfg, "graph_target_entropy", None)
             if target is None:
-                # If no explicit target is supplied, use the mean true graph
-                # entropy when available. This is synthetic-diagnostic friendly;
-                # for real data, set an explicit target or leave the coefficient 0.
+                # No explicit target: fall back to the mean true-graph entropy
+                # when available (synthetic data), else the current entropy.
                 if self.true_regime_graphs is not None:
                     G = self.true_regime_graphs.to(device).float()
                     G = G / G.sum(dim=-1, keepdim=True).clamp_min(1e-12)

@@ -1,20 +1,16 @@
 """
 Evaluation utilities for the discrete spatiotemporal graph model.
 
-Import as a module:  from evaluation_utilities import *
-
-Provides:
-  - low-level metric helpers: off_diagonal_mask, masked_pearson, binary_auroc
-  - graph-recovery: evaluate_regime_graph_recovery (diagonal-masked, regime-averaged,
-    correlation + edge-AUROC; MSE intentionally omitted)
+Contents:
+  - metric helpers: off_diagonal_mask, masked_pearson, binary_auroc
+  - graph recovery: evaluate_regime_graph_recovery (diagonal-masked, regime-averaged
+    correlation and edge-AUROC), evaluate_deviation_recovery
   - prediction baselines: persistence_baseline_accuracy,
     majority_class_baseline_accuracy, balanced_accuracy
-  - full_evaluation_report: one pass over a loader; headline = lift_over_persistence
+  - full_evaluation_report: single pass over a loader
 
-Assumes the model interface model(state_ids) -> {"next_state_logits", "graph_attn", ...}
-and batches {"state_ids": (B,N,T), "regimes": (B,T)}. See the lab notes for the
-rationale behind each metric choice (why correlation over MSE, why regime-averaging,
-why lift-over-persistence is the headline).
+Model interface: model(state_ids) -> {"next_state_logits", "graph_attn", ...}
+Batch format:    {"state_ids": (B, N, T), "regimes": (B, T)}.
 """
 
 import numpy as np
@@ -44,14 +40,13 @@ def masked_pearson(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def binary_auroc(scores: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """
-    AUROC via the rank (Mann-Whitney U) formula.
+    AUROC via the rank (Mann-Whitney U) statistic.
 
-    scores: continuous 1-D tensor (here: off-diagonal attention weights)
-    labels: 1-D tensor in {0, 1} (here: whether a true edge exists)
+    scores: continuous 1-D tensor (off-diagonal attention weights)
+    labels: 1-D tensor in {0, 1} (whether a true edge exists)
 
-    Returns P(score of a true edge > score of a non-edge). 1.0 = perfect,
-    0.5 = chance, NaN if one class is absent. Tie-averaging is unnecessary for
-    continuous attention scores.
+    Returns P(score of a true edge > score of a non-edge): 1.0 perfect, 0.5
+    chance, NaN if either class is absent.
     """
     labels = labels.bool()
     n_pos = labels.sum()
@@ -134,16 +129,14 @@ def evaluate_deviation_recovery(
     regime_graphs: torch.Tensor,         # (R, N, N)
     device: Optional[torch.device] = None,
 ) -> Dict[str, float]:
-    """Recover the *regime-specific* structure, isolated from the shared component.
+    """Recover the regime-specific structure, isolated from the shared component.
 
-    The plain regime-averaged corr over-credits the part of the graph that is common
-    to all regimes: a static graph (one matrix for every regime) matches the mean
-    graph and scores high without representing any regime difference at all. This
-    metric removes that confound by subtracting the mean-over-regimes from BOTH the
-    inferred and the true graphs, then correlating the residuals (the deviations
-    W^(r) - mean_r W). A static scorer's residual is ~0 -> ~0 here by construction;
-    only a model whose graph varies by regime can score above chance. This is the
-    metric that actually isolates the dynamic graph's contribution.
+    Plain regime-averaged correlation rewards the part of the graph common to all
+    regimes, so a static graph (one matrix for every regime) scores well without
+    capturing any regime difference. This metric subtracts the mean-over-regimes
+    from both the inferred and the true graphs and correlates the residuals
+    (W^(r) - mean_r W). A static scorer's residual is near zero and so scores near
+    chance here; only a regime-varying graph scores above it.
     """
     model.eval()
     if device is None:
@@ -193,7 +186,7 @@ def evaluate_deviation_recovery(
 # ---------------------------------------------------------------------------
 
 def persistence_baseline_accuracy(state_ids: torch.Tensor) -> float:
-    """Accuracy of predicting s_{t+1} = s_t. The key baseline to beat."""
+    """Accuracy of predicting s_{t+1} = s_t (the persistence baseline)."""
     nxt = state_ids[:, :, 1:]
     cur = state_ids[:, :, :-1]
     return (nxt == cur).float().mean().item()

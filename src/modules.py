@@ -8,8 +8,8 @@ from typing import Optional, Dict, List, Tuple
 
 
 def _sparsemax(z: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """Sparsemax (Martins & Astudillo 2016): Euclidean projection onto the simplex.
-    Produces exact zeros, so it can represent a sparse graph. Differentiable a.e."""
+    """Sparsemax: Euclidean projection onto the probability simplex. Produces
+    exact zeros (sparse rows) and is differentiable almost everywhere."""
     z = z - z.max(dim=dim, keepdim=True).values
     zs, _ = torch.sort(z, dim=dim, descending=True)
     rng = torch.arange(1, z.size(dim) + 1, device=z.device, dtype=z.dtype)
@@ -23,8 +23,8 @@ def _sparsemax(z: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
 
 def _entmax15(z: torch.Tensor, dim: int = -1, n_iter: int = 30) -> torch.Tensor:
-    """1.5-entmax (Peters et al. 2019) via bisection. Between softmax (dense) and
-    sparsemax (sparse); often the best-behaved sparse attention."""
+    """1.5-entmax via bisection. Sits between softmax (dense) and sparsemax
+    (sparse) in how aggressively it zeros small entries."""
     z = (z - z.max(dim=dim, keepdim=True).values) / 2.0
     tau_lo = z.max(dim=dim, keepdim=True).values - 1.0
     tau_hi = z.max(dim=dim, keepdim=True).values - (1.0 / z.size(dim)) ** 0.5
@@ -147,57 +147,49 @@ class DynamicGraphScorer(nn.Module):
         else:
             self.state_pair_bias = None
 
-        # per-edge independent gate (graph_activation="gated"): A[i,j] = sigmoid((score-theta)/tau)
-        # — unlike softmax/sparsemax/entmax, edges do NOT compete (no normalize-across-neighbours
-        # coupling), matching independent-Bernoulli edge structure. Learnable threshold theta
-        # (per-head); tau is a temperature. gate_row_normalise controls message scale afterward.
+        # Independent per-edge gate for graph_activation="gated":
+        #   A[i,j] = sigmoid((score - theta) / tau)
+        # Edges are scored independently rather than competing through a softmax
+        # over neighbours. theta is a learnable per-head threshold, tau a fixed
+        # temperature; gate_row_normalise rescales rows afterwards.
         self.gate_theta = nn.Parameter(torch.zeros(cfg.num_edge_heads))
         self.gate_tau = getattr(cfg, "gate_tau", 0.5)
         self.gate_row_normalise = getattr(cfg, "gate_row_normalise", True)
 
-        # optional learnable per-edge BASE graph (H, N, N), added to the QK^T logits
-        # before normalisation. Gives the dynamic scorer static's direct, full-rank,
-        # identity-indexed parameterisation as a base, with QK^T learning the
-        # time-varying DEVIATION from it (D2STGNN-style prior-free base + dynamic delta).
-        # Enabled by subclass DynamicBaseGraphScorer; off here.
+        # Optional learnable base graph (H, N, N) added to the QK^T logits before
+        # normalisation. It holds a fixed per-edge adjacency while QK^T learns the
+        # time-varying deviation from it. Enabled by DynamicBaseGraphScorer; off here.
         self.use_base_graph = False
         self.base_graph = None
 
-        # Residual gate for DynamicBaseGraphScorer. In dynamic_base mode the
-        # graph logits are
-        #
+        # Residual gate for DynamicBaseGraphScorer. When enabled, the logits are
         #     base_logits + alpha * dynamic_logits
-        #
-        # rather than base_logits + dynamic_logits. With alpha initialised small,
-        # the model starts close to the stable static/base graph and only learns
-        # dynamic deviations if they improve the prediction loss. The default
-        # gate mode is "none", which preserves the old alpha=1 behaviour exactly.
+        # instead of base_logits + dynamic_logits. A small initial alpha starts
+        # near the base graph and adds dynamic deviation over training. Mode
+        # "none" leaves alpha = 1.0.
         self.dynamic_residual_gate = getattr(cfg, "dynamic_residual_gate", "none")
         self.dynamic_residual_init = float(getattr(cfg, "dynamic_residual_init", 1.0))
         self.dynamic_residual_learnable = bool(getattr(cfg, "dynamic_residual_learnable", True))
-        # How alpha is applied in dynamic_base:
+        # How alpha is applied:
         #   "logit"  : A = normalise(base_logits + alpha * dynamic_logits)
-        #   "convex" : A = (1-alpha) * normalise(base_logits)
-        #              + alpha * normalise(base_logits + dynamic_logits)
-        # The convex option makes alpha directly interpretable as the final
-        # adjacency mixture weight between base-only and full dynamic_base.
+        #   "convex" : A = (1 - alpha) * normalise(base_logits)
+        #                  + alpha * normalise(base_logits + dynamic_logits)
+        # In convex mode alpha is the mixture weight between the base-only and
+        # full dynamic graphs.
         self.dynamic_residual_mix = getattr(cfg, "dynamic_residual_mix", "logit")
         self.dynamic_residual_raw = None
 
     @staticmethod
     def _alpha_to_raw(alpha: float) -> float:
-        # Convert alpha in (0,1) to sigmoid raw parameter. Clamp so alpha=0/1
-        # requests are numerically safe but still very close to the boundary.
+        # Map alpha in (0, 1) to the pre-sigmoid parameter. Clamp away from the
+        # exact boundary for numerical safety.
         eps = 1e-6
         alpha = min(max(float(alpha), eps), 1.0 - eps)
         return math.log(alpha / (1.0 - alpha))
 
     def _make_dynamic_residual_parameter(self) -> None:
-        """Create the optional alpha parameter after subclass sets use_base_graph.
-
-        Called by DynamicBaseGraphScorer.__init__. Kept separate so the base
-        DynamicGraphScorer remains identical for spatial_module_type="dynamic_graph".
-        """
+        """Create the alpha parameter. Called from DynamicBaseGraphScorer.__init__;
+        kept separate so the plain DynamicGraphScorer carries no gate parameters."""
         mode = self.dynamic_residual_gate
         if mode not in {"none", "scalar", "per_head"}:
             raise ValueError(
@@ -236,22 +228,14 @@ class DynamicGraphScorer(nn.Module):
         return self.base_graph.view(1, 1, self.num_heads, logits.size(-1), logits.size(-1))
 
     def _combine_base_and_dynamic(self, dynamic_logits: torch.Tensor) -> torch.Tensor:
-        """Return attention for dynamic_graph or dynamic_base.
+        """Combine base and dynamic logits into attention.
 
-        For plain dynamic_graph this is just normalise(dynamic_logits).
-
-        For dynamic_base:
-          - gate='none' preserves old behaviour exactly:
-                A = normalise(base + dynamic)
-          - mix='logit':
-                A = normalise(base + alpha * dynamic)
-          - mix='convex':
-                A_base = normalise(base)
-                A_dyn  = normalise(base + dynamic)
-                A = (1-alpha) * A_base + alpha * A_dyn
-
-        The convex option is useful diagnostically because alpha directly says
-        how much the final graph has moved from base-only toward full dynamic.
+        Plain dynamic_graph: normalise(dynamic_logits).
+        dynamic_base:
+            gate='none'  -> normalise(base + dynamic)
+            mix='logit'  -> normalise(base + alpha * dynamic)
+            mix='convex' -> (1 - alpha) * normalise(base)
+                            + alpha * normalise(base + dynamic)
         """
         if not self.use_base_graph or self.base_graph is None:
             return self._normalise(dynamic_logits)
@@ -274,24 +258,17 @@ class DynamicGraphScorer(nn.Module):
         raise RuntimeError(f"Unhandled dynamic_residual_mix={self.dynamic_residual_mix!r}")
 
     def _normalise(self, logits: torch.Tensor) -> torch.Tensor:
-        """Row-normalise edge logits into attention over neighbours (last dim).
+        """Normalise edge logits into per-row attention over neighbours (last dim).
 
-        graph_activation (cfg, default 'softmax'):
-          'softmax'   : dense; every neighbour nonzero (standard GAT).
-          'sparsemax' : simplex projection -> EXACT zeros -> sparse graph that can match
-                        a sparse ground-truth (Martins & Astudillo 2016).
-          'entmax15'  : alpha=1.5, between softmax and sparsemax; often best-behaved
-                        sparse attention (Peters et al. 2019).
-          'gated'     : per-edge INDEPENDENT gate sigmoid((score-theta)/tau), learnable
-                        theta. Edges do NOT compete (no normalize-across-neighbours
-                        coupling) — matches independent-Bernoulli edge structure of a
-                        latent graph being INFERRED (vs GAT, where A is given and softmax
-                        only weights existing edges). Optional post row-normalise controls
-                        message magnitude. Closest in spirit to L0/hard-concrete edge gates
-                        (Louizos et al. 2018) in graph-structure learning.
-        NB: CS224W uses plain-softmax GAT; sparsemax/entmax are from the NLP
-        sparse-attention literature, used here because the true graph is ~85% zeros
-        and softmax structurally cannot represent that sparsity.
+        graph_activation (default 'softmax'):
+          'softmax'   : dense; every neighbour gets non-zero weight.
+          'sparsemax' : simplex projection with exact zeros, for a sparse graph.
+          'entmax15'  : between softmax and sparsemax.
+          'gated'     : independent per-edge sigmoid gate, no competition across
+                        neighbours; row-normalised afterwards if gate_row_normalise.
+
+        The sparse activations exist because the target graphs are mostly zeros,
+        which softmax cannot represent.
         """
         act = getattr(self.cfg, "graph_activation", "softmax")
         if act == "softmax":
@@ -301,12 +278,12 @@ class DynamicGraphScorer(nn.Module):
         elif act == "entmax15":
             return _entmax15(logits, dim=-1)
         elif act == "gated":
-            # per-edge INDEPENDENT gate; no competition across neighbours.
-            # logits: (B,T,H,N,N); theta broadcast over the H axis.
+            # independent per-edge gate; no competition across neighbours.
+            # logits: (B,T,H,N,N); theta broadcast over the head axis.
             theta = self.gate_theta.view(1, 1, -1, 1, 1)
             gate = torch.sigmoid((logits - theta) / self.gate_tau)
             if self.gate_row_normalise:
-                # control message magnitude (degree) without re-imposing existence-coupling
+                # rescale row mass without re-imposing competition between edges
                 gate = gate / gate.sum(dim=-1, keepdim=True).clamp_min(1e-6)
             return gate
         else:
@@ -366,15 +343,13 @@ class StaticGraphScorer(nn.Module):
 
 
 class DynamicBaseGraphScorer(DynamicGraphScorer):
-    """Dynamic scorer + a learnable per-edge BASE graph.
+    """Dynamic scorer with an added learnable base graph.
 
-    A_t = normalise( base[h,i,j] + QK^T(h_t)/sqrt(d) )
+        A_t = normalise( base[h, i, j] + QK^T(h_t) / sqrt(d) )
 
-    The base is a raw (H, N, N) parameter (same structure as StaticGraphScorer) so it
-    can memorise the identity-keyed, full-rank adjacency directly; the QK^T term then
-    only has to learn the time-varying DEVIATION from that base. Contains the static
-    graph as a special case (QK^T -> 0), so it should recover at least static's
-    performance as a floor, plus any genuinely dynamic signal on top.
+    The base is a raw (H, N, N) parameter (as in StaticGraphScorer); QK^T then
+    learns the time-varying deviation from it. With QK^T -> 0 this reduces to the
+    static graph.
     """
 
     def __init__(self, cfg: ModelConfig) -> None:
@@ -409,10 +384,10 @@ class _SpatialMPBlock(nn.Module):
             raise ValueError("d_model must be divisible by num_edge_heads")
         self.head_dim = cfg.d_model // cfg.num_edge_heads
 
-        # what gets mixed over the graph (the "value"):
-        #   "hidden"          -> v_proj(h)        (contextualised; original behaviour)
-        #   "state_embedding" -> v_proj(e)        (raw current-state emb; matches A@kernel[s])
-        #   "concat"          -> v_proj([h ; e])  (both)
+        # Value mixed over the graph:
+        #   "hidden"          -> v_proj(h)         (contextualised hidden state)
+        #   "state_embedding" -> v_proj(e)         (raw current-state embedding)
+        #   "concat"          -> v_proj([h ; e])   (both)
         self.spatial_value = getattr(cfg, "spatial_value", "hidden")
         in_dim = cfg.d_model * 2 if self.spatial_value == "concat" else cfg.d_model
         self.v_proj = nn.Linear(in_dim, cfg.d_model)
@@ -452,10 +427,9 @@ class _SpatialMPBlock(nn.Module):
 
 class SpatialMessagePassing(nn.Module):
     """
-    Stack of message-passing blocks, all reusing the SAME graph attn (the graph
-    is computed once by the scorer, then propagated for `num_spatial_layers` hops).
-
-    num_spatial_layers defaults to 1 -> single block (original behaviour).
+    Stack of message-passing blocks that reuse the same graph attn (the scorer
+    computes it once; it is then propagated for num_spatial_layers hops).
+    num_spatial_layers defaults to 1.
 
     Input:
         h:    (B, T, N, D)

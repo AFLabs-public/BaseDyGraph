@@ -1,18 +1,18 @@
 """
 Synthetic discrete spatiotemporal data generators.
 
-Two generators, sharing one base class:
+Two generators share one base class:
 
   ContemporaneousGraphGenerator
-      The original generative law. A node's next token depends on its neighbours'
-      states AT THE SAME timestep. The recoverable structure is a regime-switched
-      contemporaneous graph W^(r).
+      A node's next token depends on its neighbours' states at the same
+      timestep. The recoverable structure is a regime-switched contemporaneous
+      graph W^(r).
 
   LeadLagGraphGenerator
       Adds a lagged coupling term: a node's next token also depends on its
-      neighbours' states k steps in the PAST, through a separate lagged graph
-      W_lag^(r). This is the structure a propagation-delay scorer should recover
-      and a contemporaneous scorer provably cannot.
+      neighbours' states k steps earlier, through a separate lagged graph
+      W_lag^(r). A propagation-delay scorer can recover this; a contemporaneous
+      scorer cannot.
 
 Both emit the same dict so they are interchangeable downstream:
     state_ids      (B, N, T)  int64 tokens
@@ -35,11 +35,9 @@ All randomness flows through a single torch.Generator for reproducibility.
 """
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
-
-from typing import Dict, List, Optional, Tuple
 
 # ------------------------------------------------------------------
 # Config
@@ -140,17 +138,16 @@ class _BaseGraphGenerator:
 
     @torch.no_grad()
     def oracle_decomposition(self, data: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """How much could a DYNAMIC graph beat a STATIC one on this data, at best?
+        """Upper bound on how much a dynamic graph can beat a static one on this data.
 
-        Re-scores every realised transition under two graph choices, holding self,
-        regime-bias and kernel fixed:
-          dynamic oracle : the TRUE per-regime graph at each step (perfect per-step model)
-          static  oracle : the MEAN graph (avg over regimes) at every step (best one fixed graph)
-        The gap is the maximum advantage any dynamic model could have over any static one
-        here. If it's ~0, dynamic CANNOT beat static on this data no matter how well trained.
-
-        Uses the contemporaneous regime graphs only (the static-vs-dynamic question);
-        lead-lag structure is a separate ablation.
+        Re-scores every realised transition under two graph choices, holding the
+        self-transition, regime-bias, and kernel terms fixed:
+          dynamic oracle : the true per-regime graph at each step
+          static  oracle : the mean graph (averaged over regimes) at every step
+        The gap is the largest advantage any dynamic model could have over any
+        static one here; if it is near zero, dynamic structure cannot help on this
+        data. Uses the contemporaneous regime graphs only; lead-lag structure is a
+        separate ablation.
         """
         state_ids = data["state_ids"]                 # (B, N, T)
         regimes = data["regimes"]                      # (B, T)
@@ -331,32 +328,29 @@ def build_generator(cfg: SyntheticGraphDataConfig, lead_lag: bool = False) -> _B
 def data_diagnostics(data: Dict[str, torch.Tensor], num_states: Optional[int] = None,
                      generator: Optional["_BaseGraphGenerator"] = None,
                      verbose: bool = True) -> Dict[str, float]:
-    """Quantify how (un)predictable the generated data is, so absolute model accuracy
-    can be read against the achievable ceiling rather than against 1.0.
+    """Quantify how (un)predictable the generated data is, so model accuracy can be
+    read against the achievable ceiling rather than against 1.0.
 
-    Pass a dict from generate(return_true_probs=True) to get the oracle measures
-    (ceiling, oracle NLL, true conditional entropy); without true_probs only the
-    empirical measures are computed.
+    Pass a dict from generate(return_true_probs=True) to also get the oracle
+    measures (ceiling, oracle NLL, true conditional entropy); without true_probs
+    only the empirical measures are computed.
 
     Pass `generator` (the object that produced the data) to also get the
-    static-vs-dynamic oracle decomposition: the MOST a dynamic graph could beat a
-    static one on this data. If `dynamic_headroom_acc` ~ 0, dynamic cannot win here
-    no matter how well trained — the data doesn't reward time-varying structure.
+    static-vs-dynamic oracle decomposition. If dynamic_headroom_acc is near zero,
+    time-varying structure cannot help on this data.
 
-    Returns a dict and (if verbose) prints a small report. Key numbers:
-      achievable_acc_ceiling : best top-1 accuracy ANY model could get (argmax of the
-                               true dist vs the realised token). Compare model_acc to this.
-      oracle_nll             : lowest achievable cross-entropy (mean -log p_true(realised)).
-                               Compare model nll to this, not to 0.
-      true_cond_entropy      : mean entropy of the true per-step distribution (full context).
-      H_next_given_current   : empirical H(s_{t+1} | s_t) — predictability from the current
-                               token ALONE (sequence-only, ignores graph/regime).
-      structure_information  : H_next_given_current - true_cond_entropy — the predictive
-                               information the graph + regime add beyond the current token.
-                               NOTE: this is the TOTAL structural signal; a STATIC graph can
-                               capture most of it. The dynamic-only slice is the oracle gap below.
-      dynamic_headroom_acc   : static_oracle vs dynamic_oracle accuracy gap (needs `generator`).
-                               This is the dynamic-ONLY signal — what static structurally cannot get.
+    Returns a dict and (if verbose) prints a short report. Key fields:
+      achievable_acc_ceiling : best top-1 accuracy attainable (argmax of the true
+                               distribution vs the realised token).
+      oracle_nll             : lowest achievable cross-entropy (mean -log p_true).
+      true_cond_entropy      : mean entropy of the true per-step distribution.
+      H_next_given_current   : empirical H(s_{t+1} | s_t), predictability from the
+                               current token alone (ignores graph/regime).
+      structure_information  : H_next_given_current - true_cond_entropy; the
+                               predictive information graph + regime add beyond the
+                               current token. A static graph captures most of it;
+                               the dynamic-only slice is the oracle gap below.
+      dynamic_headroom_acc   : static vs dynamic oracle accuracy gap (needs `generator`).
       persistence_rate, state_entropy, state_balance_ratio, regime_balance, mean_regime_dwell
     """
     state_ids = data["state_ids"]                      # (B, N, T)
