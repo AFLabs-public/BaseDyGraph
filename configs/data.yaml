@@ -1,8 +1,9 @@
-# Base data configuration for BaseDyGraph.
-# `data:` maps 1:1 to src/synthetic_generators.py:SyntheticGraphDataConfig.
-# `splits` and `batch_size` configure the train/val/test partition and dataloader.
-# The sweep may override any `data:` field; doing so regenerates the dataset
-# (the model dimensions num_states / num_nodes are read from here).
+# Data configuration for BaseDyGraph.
+# `data:` maps to src/synthetic_generators.py:SyntheticGraphDataConfig and matches
+# the data block in notebooks/BaseDyGraph_experiments.ipynb. `splits` and
+# `batch_size` set the train/val/test partition and the dataloader.
+# These knobs define the task and are fixed; overriding a `data:` field in a sweep
+# regenerates the dataset (num_states / num_nodes are read from here).
 
 data:
   num_samples: 3000

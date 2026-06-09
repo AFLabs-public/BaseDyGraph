@@ -1,58 +1,59 @@
-# Base model configuration for BaseDyGraph.
-# `model:` maps to src/utilities.py:ModelConfig (num_states / num_nodes are filled
-# from data.yaml at load time, so they are intentionally omitted here).
-# `training:` holds the optimisation knobs consumed by the notebooks.
+# Base model configuration for BaseDyGraph (used by the sweep notebook).
+# `model:` maps to src/utilities.py:ModelConfig; num_states / num_nodes are filled
+# from data.yaml at load time. `training:` holds the optimisation knobs.
 #
-# This is a known-good interlaced dynamic-base setup. The sweep overrides a
-# subset of these fields; everything not swept falls back to the values here.
+# This is a deliberately plain baseline, not a tuned setup: a single-stage dynamic
+# graph with no gate, no interlacing, and no regularisation. Finding a configuration
+# that captures the dynamic structure is the exercise; the search in sweep.yaml is
+# what explores the choices that matter.
 
 model:
-  # --- dimensions / capacity ---
-  d_model: 96
-  nhead: 6
+  # dimensions / capacity
+  d_model: 64
+  nhead: 4
   num_temporal_layers: 2
   num_spatial_layers: 1
-  num_edge_heads: 4
+  num_edge_heads: 2
   graph_hidden_dim: 64
   ff_mult: 4
   dropout: 0.0
-  spatial_dropout: 0.0          # keep the scorer's adjacency exactly row-stochastic
+  spatial_dropout: 0.0
 
-  # --- embeddings / graph structure ---
+  # embeddings / graph structure
   use_node_embedding: true
-  use_state_pair_bias: true
+  use_state_pair_bias: false
   add_self_loops: false
   symmetric_graph: false
 
-  # --- module types ---
-  temporal_module_type: transformer
-  spatial_module_type: dynamic_base
-  spatial_value: concat           # mix raw current-state emb + hidden (matches A @ kernel[s])
-  graph_activation: softmax       # dense during training; sparsemax/entmax15 also available
-  gate_tau: 1.0
+  # module types
+  temporal_module_type: transformer    # transformer | none
+  spatial_module_type: dynamic_graph   # none | static_graph | dynamic_graph | dynamic_base | oracle_graph
+  spatial_value: hidden                # hidden | state_embedding | concat
+  graph_activation: softmax            # softmax | sparsemax | entmax15 | gated
+  gate_tau: 0.5                        # used only by graph_activation: gated
   gate_row_normalise: true
 
-  # --- interlaced spatio-temporal stack ---
-  interlaced_st_blocks: true
-  num_st_blocks: 3
-  first_spatial_module_type: static_graph
+  # interlaced spatio-temporal stack (off = one temporal stage then one spatial stage)
+  interlaced_st_blocks: false
+  num_st_blocks: 1                     # >1 implies interlacing
+  first_spatial_module_type: null      # e.g. static_graph for block 0
   st_block_post_norm: true
 
-  # --- dynamic-base convex residual gate ---
-  dynamic_residual_gate: per_head
-  dynamic_residual_init: 0.5
+  # dynamic-base residual gate (used only by spatial_module_type: dynamic_base)
+  dynamic_residual_gate: none          # none | scalar | per_head
+  dynamic_residual_init: 1.0           # alpha in [0, 1]; small starts near the base graph
   dynamic_residual_learnable: true
-  dynamic_residual_mix: convex
+  dynamic_residual_mix: logit          # logit | convex
 
-  # --- graph-shape regularisation (off by default; sweep can switch on) ---
+  # graph-shape regularisation (off)
   graph_reg_layer: -1
-  graph_reg_warmup_epochs: 20
+  graph_reg_warmup_epochs: 0
   graph_entropy_reg: 0.0
-  graph_target_entropy: 2.0
+  graph_target_entropy: null
   graph_target_entropy_reg: 0.0
   graph_temporal_smooth_reg: 0.0
 
-  # --- graph evaluation / logging ---
+  # graph evaluation / logging
   graph_eval_layer: -1
   graph_log_all_layers: true
 

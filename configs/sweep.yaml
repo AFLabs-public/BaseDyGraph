@@ -1,17 +1,20 @@
 # Weights & Biases sweep for BaseDyGraph.
 #
-# Run it from notebooks/BaseDyGraph_sweep.ipynb (recommended), which loads this
-# file and drives the agent. Parameter names below are plain field names from
-# ModelConfig / SyntheticGraphDataConfig / the training block; the notebook
-# routes each one to the right config object by inspecting the dataclasses, so
-# overriding a data field regenerates the dataset while model/training fields
-# do not.
+# Run from notebooks/BaseDyGraph_sweep.ipynb, which loads this file and drives the
+# agent. Parameter names are plain field names from ModelConfig,
+# SyntheticGraphDataConfig, or the training block; the notebook routes each to the
+# right config by dataclass, so overriding a data field regenerates the dataset
+# while model/training fields do not.
 #
-# CLI alternative (runs each trial as its own process):
-#   1. export a runnable script (the notebook has a "Save as script" note), then
-#      add a top-level `program: <that_script>.py` key here;
-#   2. wandb sweep configs/sweep.yaml
-#   3. wandb agent <entity>/<project>/<sweep_id>
+# The base in model.yaml is a plain baseline, so the search below is what explores
+# the architecture as well as the hyperparameters: it sweeps the scorer type, the
+# residual gate, interlacing depth, and regularisation alongside the usual knobs.
+#
+# CLI alternative (one process per trial), which prunes more reliably than the
+# in-notebook agent:
+#   wandb sweep configs/sweep.yaml
+#   wandb agent <entity>/<project>/<sweep_id>
+# The CLI agent needs a top-level `program:` key pointing at a runnable script.
 
 method: bayes
 
@@ -23,7 +26,7 @@ metric:
   # which the notebook logs once at the end (and disable early_terminate below).
 
 parameters:
-  # --- optimisation ---
+  # optimisation
   lr:
     distribution: log_uniform_values
     min: 0.0001
@@ -33,35 +36,43 @@ parameters:
   seed:
     values: [0, 1, 2]
 
-  # --- capacity ---
+  # capacity
   d_model:
     values: [64, 96, 128]
   num_edge_heads:
     values: [2, 4]
   graph_hidden_dim:
     values: [32, 64, 128]
-  num_st_blocks:
-    values: [2, 3]
 
-  # --- graph-inference choices ---
+  # architecture: which scorer, how deep, and what it mixes
+  spatial_module_type:
+    values: [static_graph, dynamic_graph, dynamic_base]
+  num_st_blocks:
+    values: [1, 2, 3]          # 1 = single stage; >1 = interlaced
   spatial_value:
     values: [hidden, state_embedding, concat]
   graph_activation:
     values: [softmax, entmax15]
+  use_state_pair_bias:
+    values: [false, true]
+
+  # dynamic-base residual gate (active when spatial_module_type: dynamic_base)
+  dynamic_residual_gate:
+    values: [none, per_head]
   dynamic_residual_init:
     values: [0.1, 0.3, 0.5]
   dynamic_residual_mix:
     values: [logit, convex]
 
-  # --- graph-shape regularisation (sharpen toward entropy < 2) ---
+  # graph-shape regularisation
   graph_target_entropy_reg:
     values: [0.0, 0.01, 0.05]
   graph_target_entropy:
     values: [1.8, 2.0, 2.2]
 
 # Hyperband pruning. Works cleanly with the CLI agent (each trial is its own
-# process). With the in-notebook agent it may not interrupt an in-progress
-# trainer.fit; see the notebook note. min_iter is in epochs (the val/acc step).
+# process). The in-notebook agent may not interrupt a trial mid-fit; see the
+# notebook. min_iter is in epochs (the val/acc logging step).
 early_terminate:
   type: hyperband
   min_iter: 20
